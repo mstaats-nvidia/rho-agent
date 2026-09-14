@@ -101,3 +101,18 @@ class TestExtractUsageCost:
         assert "cost_usd" not in usage
         assert usage["input_tokens"] == 1000
         assert usage["output_tokens"] == 500
+
+
+def test_build_kwargs_forwards_custom_api_base() -> None:
+    client = object.__new__(LiteLLMClient)
+    client._model = "openai/test-model"
+    client._api_key = "test-key"
+    client._base_url = "http://model.example.test/v1"
+    client._initial_timeout = 10.0
+    client._temperature = None
+    client._reasoning_effort = None
+    client._response_format = None
+
+    kwargs = client._build_kwargs(messages=[{"role": "user", "content": "hello"}])
+
+    assert kwargs["api_base"] == "http://model.example.test/v1"

@@ -1,6 +1,6 @@
 # Harbor Integration
 
-This package exposes `rho_agent.eval.harbor.agent:RhoAgent` for running `rho-agent` inside [Harbor](https://github.com/laude-institute/harbor) jobs.
+This package exposes `rho_agent.eval.harbor.agent:RhoAgent` for running `rho-agent` inside [Harbor](https://github.com/harbor-framework/harbor) jobs.
 
 Harbor already supports loading installed agent classes by import path, so the supported integration point is:
 
@@ -10,12 +10,14 @@ rho_agent.eval.harbor.agent:RhoAgent
 
 ## User Workflow
 
-Use this when you want to run Harbor with a locally installed `rho-agent` package while task containers install `rho-agent` from git.
+Use this when you want to run Harbor with a locally installed `rho-agent` adapter. Task
+containers can install rho-agent from the same local checkout, from git, or from PyPI.
 
 ### Prerequisites
 
 - Python 3.12+ for Harbor
 - Docker
+- Harbor 0.22.0
 - API credentials exported in your shell or loaded from a `.env`
 
 Harbor only forwards environment variables that exist in the `harbor run` process environment. A shell variable is not enough.
@@ -39,19 +41,39 @@ printenv OPENAI_API_KEY | wc -c
 
 If `printenv OPENAI_API_KEY` is empty, Harbor will start but the agent inside the task will fail authentication.
 
-Install Harbor and install `rho-agent` from git in your local environment so Harbor can import `rho_agent.eval.harbor.agent:RhoAgent`:
+Install Harbor and rho-agent into the same environment so Harbor can import
+`rho_agent.eval.harbor.agent:RhoAgent`:
 
 ```bash
-uv tool install harbor
-uv tool install 'git+https://github.com/smith-nathanh/rho-agent.git#egg=rho-agent[evals]'
+uv tool install 'harbor==0.22.0' \
+  --with 'git+https://github.com/smith-nathanh/rho-agent.git#egg=rho-agent[evals]'
 ```
 
 Or in a project environment:
 
 ```bash
-uv add harbor
-uv pip install 'git+https://github.com/smith-nathanh/rho-agent.git#egg=rho-agent[evals]'
+uv add 'harbor==0.22.0' \
+  'git+https://github.com/smith-nathanh/rho-agent.git#egg=rho-agent[evals]'
 ```
+
+For local development, install this checkout into the same environment as Harbor and tell
+the adapter to upload it into each task container:
+
+```bash
+uv venv
+uv pip install 'harbor==0.22.0' -e '.[evals]'
+
+harbor trial start \
+  --path /path/to/harbor-task \
+  --agent rho_agent.eval.harbor.agent:RhoAgent \
+  --model openai/gpt-5-mini \
+  --agent-kwarg install_source=local \
+  --agent-kwarg source_dir="$PWD"
+```
+
+This mode includes uncommitted source changes, which makes it the appropriate path for
+running locally generated ablations. Provider credentials and model configuration must be
+exported before starting Harbor.
 
 ### Sample configs
 
@@ -124,7 +146,9 @@ agents:
   - import_path: rho_agent.eval.harbor.agent:RhoAgent
 ```
 
-Inside each task container, `RhoAgent` can install `rho-agent` either from PyPI or from git. At the moment, the supported workflow is git install via:
+Inside each task container, `RhoAgent` can install `rho-agent` from a local checkout, git,
+or PyPI. Local installation uploads `source_dir` through Harbor's environment API; it does
+not require the checkout to be externally reachable. Git installation uses:
 
 ```yaml
 agents:
@@ -143,6 +167,7 @@ Bundled configs use `kwargs` such as:
 
 - `install_source`
 - `repo_url`
+- `source_dir`
 - `bash_only`
 - `enable_reviewer`
 - `reviewer_max_iterations`
@@ -172,7 +197,8 @@ uv pip install -e ~/proj/rho-agent
 
 ## Environment Variables
 
-`RhoAgent` forwards provider configuration from the Harbor host process into the task container through `ExecInput(env=...)`. The main variables are:
+`RhoAgent` forwards provider configuration from the Harbor host process into the task
+container through Harbor's environment API. The main variables are:
 
 - `OPENAI_API_KEY`
 - `RHO_AGENT_MODEL` or `OPENAI_MODEL`

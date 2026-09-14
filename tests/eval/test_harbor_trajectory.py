@@ -42,9 +42,68 @@ def test_step_metrics_aggregate_multiple_api_calls() -> None:
     builder.build_from_events(events, user_input="task")
     trajectory = builder.to_trajectory()
 
+    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["session_id"]
+    assert trajectory["trajectory_id"]
+    assert trajectory["agent"] == {
+        "name": "rho-agent",
+        "version": "0.1.0",
+        "model_name": "gpt-5-mini",
+    }
+    assert trajectory["steps"][0]["step_id"] == 1
     agent_step = trajectory["steps"][1]
+    assert agent_step["step_id"] == 2
     assert agent_step["metrics"]["prompt_tokens"] == 130
     assert agent_step["metrics"]["completion_tokens"] == 60
     assert agent_step["metrics"]["cached_tokens"] == 10
     assert agent_step["metrics"]["cost_usd"] == 0.015
     assert agent_step["metrics"]["extra"]["reasoning_tokens"] == 7
+    assert trajectory["final_metrics"] == {
+        "total_prompt_tokens": 130,
+        "total_completion_tokens": 60,
+        "total_cached_tokens": 10,
+        "total_cost_usd": 0.015,
+        "total_steps": 2,
+        "extra": {"context_size": 130, "total_reasoning_tokens": 7},
+    }
+
+
+def test_tool_calls_and_observations_use_atif_field_names() -> None:
+    builder = TrajectoryBuilder(model="gpt-5-mini")
+    builder.build_from_events(
+        [
+            AgentEvent(
+                type="tool_start",
+                tool_call_id="call-1",
+                tool_name="bash",
+                tool_args={"command": "pwd"},
+            ),
+            AgentEvent(
+                type="tool_end",
+                tool_call_id="call-1",
+                tool_name="bash",
+                tool_result="/app",
+                tool_metadata={"exit_code": 0},
+            ),
+        ],
+        user_input="task",
+    )
+
+    agent_step = builder.to_trajectory()["steps"][1]
+
+    assert agent_step["tool_calls"] == [
+        {
+            "tool_call_id": "call-1",
+            "function_name": "bash",
+            "arguments": {"command": "pwd"},
+        }
+    ]
+    assert agent_step["observation"] == {
+        "results": [
+            {
+                "source_call_id": "call-1",
+                "content": "/app",
+                "extra": {"exit_code": 0},
+            }
+        ]
+    }

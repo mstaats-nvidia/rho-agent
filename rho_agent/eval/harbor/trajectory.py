@@ -8,7 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rho_agent import __version__
 from rho_agent.core.events import AgentEvent
+
+_SCHEMA_VERSION = "ATIF-v1.7"
 
 
 @dataclass
@@ -57,6 +60,8 @@ class TrajectoryBuilder:
             model: Model name for metadata.
         """
         self._model = model
+        self._session_id = str(uuid.uuid4())
+        self._trajectory_id = str(uuid.uuid4())
         self._steps: list[Step] = []
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -182,56 +187,70 @@ class TrajectoryBuilder:
             Dictionary in ATIF format.
         """
         steps_data = []
-        for step in self._steps:
-            step_dict: dict[str, Any] = {"source": step.source}
-
-            if step.message:
-                step_dict["message"] = step.message
+        for step_id, step in enumerate(self._steps, start=1):
+            step_dict: dict[str, Any] = {
+                "step_id": step_id,
+                "source": step.source,
+                "message": step.message or "",
+            }
 
             if step.tool_calls:
                 step_dict["tool_calls"] = [
                     {
-                        "call_id": tc.call_id,
-                        "name": tc.name,
+                        "tool_call_id": tc.call_id,
+                        "function_name": tc.name,
                         "arguments": tc.arguments,
                     }
                     for tc in step.tool_calls
                 ]
 
             if step.observations:
-                step_dict["observations"] = [
-                    {
-                        "source_call_id": obs.source_call_id,
-                        "content": obs.content,
-                        **({"metadata": obs.metadata} if obs.metadata else {}),
-                    }
-                    for obs in step.observations
-                ]
+                step_dict["observation"] = {
+                    "results": [
+                        {
+                            "source_call_id": obs.source_call_id,
+                            "content": obs.content,
+                            **({"extra": obs.metadata} if obs.metadata else {}),
+                        }
+                        for obs in step.observations
+                    ]
+                }
 
             if step.metrics:
                 step_dict["metrics"] = step.metrics
 
             steps_data.append(step_dict)
 
-        metadata: dict[str, Any] = {
-            "model": self._model,
-            "total_input_tokens": self._total_input_tokens,
-            "total_output_tokens": self._total_output_tokens,
+        final_metrics: dict[str, Any] = {
+            "total_prompt_tokens": self._total_input_tokens,
+            "total_completion_tokens": self._total_output_tokens,
             "total_cached_tokens": self._total_cached_tokens,
             "total_cost_usd": self._total_cost_usd,
-            "context_size": self._context_size,
+            "total_steps": len(steps_data),
         }
 
-        # Add reasoning tokens in extra field for ATIF compliance
-        # Reasoning tokens are a subset of output_tokens, tracked separately for analysis
+        final_extra: dict[str, Any] = {}
+        if self._context_size:
+            final_extra["context_size"] = self._context_size
         if self._total_reasoning_tokens:
-            metadata["extra"] = {
-                "total_reasoning_tokens": self._total_reasoning_tokens,
-            }
+            final_extra.update(
+                {
+                    "total_reasoning_tokens": self._total_reasoning_tokens,
+                }
+            )
+        if final_extra:
+            final_metrics["extra"] = final_extra
 
+        agent: dict[str, Any] = {"name": "rho-agent", "version": __version__}
+        if self._model:
+            agent["model_name"] = self._model
         return {
+            "schema_version": _SCHEMA_VERSION,
+            "session_id": self._session_id,
+            "trajectory_id": self._trajectory_id,
+            "agent": agent,
             "steps": steps_data,
-            "metadata": metadata,
+            "final_metrics": final_metrics,
         }
 
     def save(self, path: Path | str) -> None:

@@ -178,6 +178,7 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
     # LiteLLM uses model names like "openai/gpt-5-mini" or "anthropic/claude-3-5-sonnet"
     model = os.environ.get("RHO_AGENT_MODEL") or os.environ.get("OPENAI_MODEL", "openai/gpt-5-mini")
     api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("RHO_AGENT_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     temperature = (
         float(os.environ["RHO_AGENT_TEMPERATURE"])
         if "RHO_AGENT_TEMPERATURE" in os.environ
@@ -191,6 +192,7 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
     client = LiteLLMClient(
         model=model,
         api_key=api_key,
+        base_url=base_url,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
         chunk_timeout=chunk_timeout,

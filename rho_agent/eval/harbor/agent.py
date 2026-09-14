@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
+import tarfile
 from importlib import metadata
 from pathlib import Path
 
-from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
+from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 _CONTAINER_VENV = "/opt/rho-agent-venv"
+_CONTAINER_SOURCE = "/installed-agent/rho-agent"
+_CONTAINER_SOURCE_ARCHIVE = "/installed-agent/rho-agent-source.tar.gz"
+_LOCAL_SOURCE_EXCLUDES = {
+    ".env",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "jobs",
+    "trials",
+}
 
 
 def _normalize_model_for_comparison(model: str | None) -> str | None:
@@ -51,6 +67,7 @@ class RhoAgent(BaseInstalledAgent):
         logger: logging.Logger | None = None,
         install_source: str = "pypi",
         repo_url: str | None = None,
+        source_dir: Path | str | None = None,
         bash_only: bool = False,
         enable_reviewer: bool = False,
         reviewer_max_iterations: int = 1,
@@ -68,8 +85,11 @@ class RhoAgent(BaseInstalledAgent):
             logs_dir: Directory to write agent logs to.
             model_name: Model to use (e.g., "openai/gpt-5-mini").
             logger: Logger instance.
-            install_source: How to install rho-agent in the task container: "pypi" or "git".
+            install_source: How to install rho-agent in the task container: "pypi", "git",
+                or "local". Local uploads the host checkout into the task container.
             repo_url: Optional git repository URL used when install_source="git".
+            source_dir: Host checkout to upload when install_source="local". Defaults to the
+                checkout containing this adapter.
             bash_only: If True, only provide bash tool (no Read, Grep, etc.).
             enable_reviewer: If True, run post-execution review after actor completes.
             reviewer_max_iterations: Max review-revise loops (0 = review only, no revision).
@@ -80,9 +100,9 @@ class RhoAgent(BaseInstalledAgent):
             cost_ceiling_usd: Max cost per task in USD, 0 = disabled (default: 0.0).
         """
         normalized_install_source = install_source.strip().lower()
-        if normalized_install_source not in {"pypi", "git"}:
+        if normalized_install_source not in {"pypi", "git", "local"}:
             raise ValueError(
-                "install_source must be 'pypi' or 'git', "
+                "install_source must be 'pypi', 'git', or 'local', "
                 f"got {install_source!r}"
             )
 
@@ -90,6 +110,20 @@ class RhoAgent(BaseInstalledAgent):
         super().__init__(logs_dir, *args, model_name=model_name, logger=logger, **kwargs)
         self._install_source = normalized_install_source
         self._repo_url = repo_url or self.DEFAULT_REPO_URL
+        self._source_dir = (
+            Path(source_dir).expanduser().resolve()
+            if source_dir is not None
+            else Path(__file__).resolve().parents[3]
+        )
+        if self._install_source == "local":
+            if not (self._source_dir / "pyproject.toml").is_file():
+                raise ValueError(
+                    f"local rho-agent source has no pyproject.toml: {self._source_dir}"
+                )
+            if not (self._source_dir / "rho_agent").is_dir():
+                raise ValueError(
+                    f"local rho-agent source has no rho_agent package: {self._source_dir}"
+                )
         self._bash_only = bash_only
         self._enable_reviewer = enable_reviewer
         self._reviewer_max_iterations = reviewer_max_iterations
@@ -135,7 +169,115 @@ class RhoAgent(BaseInstalledAgent):
         }
         if self._version:
             variables["version"] = self._version
+        if self._install_source == "local":
+            variables["source_dir"] = str(self._source_dir)
         return variables
+
+    def _build_local_source_archive(self) -> Path:
+        """Package local source while excluding credentials and host-only artifacts."""
+        source_archive = self.logs_dir / "rho-agent-source.tar.gz"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        def exclude_local_artifacts(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            if any(part in _LOCAL_SOURCE_EXCLUDES for part in Path(member.name).parts):
+                return None
+            return member
+
+        with tarfile.open(source_archive, "w:gz") as archive:
+            archive.add(
+                self._source_dir,
+                arcname=".",
+                filter=exclude_local_artifacts,
+            )
+        return source_archive
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        """Install the selected rho-agent source into the Harbor task container."""
+        dependencies = ["ca-certificates", "curl"]
+        if self._install_source == "git":
+            dependencies.append("git")
+        if self._install_source == "local":
+            dependencies.append("tar")
+        dependency_list = " ".join(dependencies)
+        dependency_checks = " && ".join(
+            f"command -v {dependency} >/dev/null 2>&1"
+            for dependency in dependencies
+            if dependency != "ca-certificates"
+        )
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"{{ {dependency_checks}; }} || "
+                f"(apt-get update -qq && apt-get install -y -qq {dependency_list})"
+            ),
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+            timeout_sec=300,
+        )
+
+        path_setup = 'export PATH="$HOME/.local/bin:$PATH"'
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"{path_setup}; command -v uv >/dev/null 2>&1 || "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh"
+            ),
+            timeout_sec=120,
+        )
+
+        agent_user = str(environment.default_user or "root")
+        quoted_user = shlex.quote(agent_user)
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"mkdir -p {shlex.quote(_CONTAINER_VENV)} "
+                f"{shlex.quote(_CONTAINER_SOURCE)} && "
+                f"chown -R {quoted_user}:{quoted_user} "
+                f"{shlex.quote(_CONTAINER_VENV)} {shlex.quote(_CONTAINER_SOURCE)}"
+            ),
+        )
+
+        if self._install_source == "local":
+            source_archive = self._build_local_source_archive()
+            await environment.upload_file(source_archive, _CONTAINER_SOURCE_ARCHIVE)
+            await self.exec_as_root(
+                environment,
+                command=(
+                    f"tar -xzf {shlex.quote(_CONTAINER_SOURCE_ARCHIVE)} "
+                    f"-C {shlex.quote(_CONTAINER_SOURCE)} && "
+                    f"chown -R {quoted_user}:{quoted_user} {shlex.quote(_CONTAINER_SOURCE)}"
+                ),
+            )
+            package_spec = shlex.quote(f"{_CONTAINER_SOURCE}[evals]")
+        elif self._install_source == "git":
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    f"git clone {shlex.quote(self._repo_url)} "
+                    f"{shlex.quote(_CONTAINER_SOURCE)}"
+                ),
+                timeout_sec=300,
+            )
+            if self._version:
+                await self.exec_as_agent(
+                    environment,
+                    command=(
+                        f"git -C {shlex.quote(_CONTAINER_SOURCE)} checkout "
+                        f"{shlex.quote(self._version)}"
+                    ),
+                )
+            package_spec = shlex.quote(f"{_CONTAINER_SOURCE}[evals]")
+        else:
+            version_suffix = f"=={self._version}" if self._version else ""
+            package_spec = shlex.quote(f"rho-agent[evals]{version_suffix}")
+
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"{path_setup}; uv venv {shlex.quote(_CONTAINER_VENV)} --clear && "
+                f"uv pip install --python {_CONTAINER_VENV}/bin/python {package_spec}"
+            ),
+            timeout_sec=300,
+        )
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Parse token usage and cost from telemetry, populate Harbor's AgentContext."""
@@ -183,10 +325,10 @@ class RhoAgent(BaseInstalledAgent):
         except Exception as e:
             self.logger.warning(f"Failed to parse telemetry DB: {e}")
 
-    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
-        """Create commands to run rho-agent on the task."""
-        raw_rho_agent_model = os.environ.get("RHO_AGENT_MODEL")
-        raw_openai_model = os.environ.get("OPENAI_MODEL")
+    def _build_run_command(self, instruction: str) -> tuple[str, dict[str, str]]:
+        """Build the in-container command and environment for a rho-agent run."""
+        raw_rho_agent_model = self._get_env("RHO_AGENT_MODEL")
+        raw_openai_model = self._get_env("OPENAI_MODEL")
         raw_config_model = self.model_name
 
         env_model = raw_rho_agent_model or raw_openai_model
@@ -222,18 +364,20 @@ class RhoAgent(BaseInstalledAgent):
             raise ValueError("Resolved model is empty after normalization")
 
         env = {
-            "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
             "RHO_AGENT_MODEL": selected_model,
             "RHO_AGENT_TELEMETRY_DB": "/logs/agent/telemetry.db",
         }
+        api_key = self._get_env("OPENAI_API_KEY")
+        if api_key:
+            env["OPENAI_API_KEY"] = api_key
 
         # Add base URL if configured
-        base_url = os.environ.get("RHO_AGENT_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+        base_url = self._get_env("RHO_AGENT_BASE_URL") or self._get_env("OPENAI_BASE_URL")
         if base_url:
             env["RHO_AGENT_BASE_URL"] = base_url
 
         # Add service tier if configured (e.g., "flex" for lower cost)
-        service_tier = os.environ.get("RHO_AGENT_SERVICE_TIER")
+        service_tier = self._get_env("RHO_AGENT_SERVICE_TIER")
         if service_tier:
             env["RHO_AGENT_SERVICE_TIER"] = service_tier
 
@@ -278,25 +422,25 @@ class RhoAgent(BaseInstalledAgent):
             f"cost_ceiling_usd: {self._cost_ceiling_usd}"
         )
 
-        # Escape instruction for shell
         escaped = shlex.quote(instruction)
-
-        # Build the run command
-        # Use tee to stream output to mounted logs (survives timeout).
         bash_only_flag = " --bash-only" if self._bash_only else ""
         cmd = (
             f'export PATH="$HOME/.local/bin:$PATH"; '
             f'{_CONTAINER_VENV}/bin/python -B -m rho_agent.eval.harbor.runner '
-            f'{escaped} "$(pwd)"{bash_only_flag} '
+            f'{escaped} "$PWD"{bash_only_flag} '
             f"2>&1 | tee /logs/agent/stdout.txt"
         )
+        return cmd, env
 
-        return [
-            ExecInput(
-                command=f"bash -c {shlex.quote(cmd)}",
-                env=env,
-            )
-        ]
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        """Run rho-agent in the task container using Harbor 0.22's agent API."""
+        command, env = self._build_run_command(instruction)
+        await self.exec_as_agent(environment, command=command, env=env)
 
 
 # For Harbor's import_path to work

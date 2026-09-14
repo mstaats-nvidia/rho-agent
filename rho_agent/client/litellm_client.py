@@ -23,6 +23,7 @@ class LiteLLMClient:
         self,
         model: str = "gpt-5-nano",
         api_key: str | None = None,
+        base_url: str | None = None,
         chunk_timeout: float | None = None,
         initial_timeout: float | None = None,
         temperature: float | None = None,
@@ -41,6 +42,7 @@ class LiteLLMClient:
 
         self._model = model
         self._api_key = api_key
+        self._base_url = base_url
         self._chunk_timeout = chunk_timeout or self.DEFAULT_CHUNK_TIMEOUT
         self._initial_timeout = initial_timeout or self.DEFAULT_INITIAL_TIMEOUT
         self._temperature = temperature
@@ -85,6 +87,8 @@ class LiteLLMClient:
 
         if self._api_key:
             kwargs["api_key"] = self._api_key
+        if self._base_url:
+            kwargs["api_base"] = self._base_url
 
         # reasoning_effort and temperature are mutually exclusive
         # reasoning_effort is for OpenAI o-series/GPT-5 models
