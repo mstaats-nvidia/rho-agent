@@ -237,16 +237,19 @@ class TrajectoryBuilder:
             "metadata": metadata,
         }
 
-    def save(self, path: Path | str) -> None:
+    def save(self, path: Path | str, *, incomplete: bool = False) -> None:
         """Atomically write trajectory JSON, preserving the last complete checkpoint.
 
         Args:
             path: Output file path.
+            incomplete: Mark an observed prefix that may omit later activity.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         trajectory = self.to_trajectory()
+        if incomplete:
+            trajectory["metadata"]["incomplete"] = True
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -269,4 +272,4 @@ class TrajectoryBuilder:
         """
         snapshot = deepcopy(self)
         snapshot.build_from_events(events, user_input=user_input)
-        snapshot.save(path)
+        snapshot.save(path, incomplete=True)

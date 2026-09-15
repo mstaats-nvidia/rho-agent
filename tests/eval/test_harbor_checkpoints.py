@@ -56,6 +56,7 @@ async def test_runner_checkpoints_before_turn_completion(tmp_path, monkeypatch, 
                 )
             )
             checkpoint = json.loads(path.read_text())
+            assert checkpoint["metadata"]["incomplete"] is True
             assert checkpoint["steps"][1]["observations"][0]["content"] == observation
             # Streaming text after the last checkpoint must survive graceful cancellation.
             await on_event(AgentEvent(type="text", content="latest partial response"))
@@ -69,6 +70,7 @@ async def test_runner_checkpoints_before_turn_completion(tmp_path, monkeypatch, 
     else:
         await runner.run_task("task", str(tmp_path))
     final = json.loads(path.read_text())
+    assert final["metadata"].get("incomplete", False) is cancel
     assert len(final["steps"]) == 2
     assert final["steps"][1]["message"] == "latest partial response"
     assert final["steps"][1]["observations"][0]["content"] == observation
@@ -126,6 +128,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         check=False,
     )
     assert result.returncode == -signal.SIGKILL
+    assert json.loads(path.read_text())["metadata"]["incomplete"] is True
     assert json.loads(path.read_text())["steps"] == [
         {"source": "user", "message": "task"},
         {"source": "agent", "message": "observed"},

@@ -240,6 +240,7 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
 
     # Create trajectory builder for ATIF output
     trajectory_builder = TrajectoryBuilder(model=model)
+    recording_complete = False
 
     try:
         # Track events for reviewer (full trace, not just text output)
@@ -377,9 +378,10 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
                 client=client,
                 max_iterations=max_iterations,
             )
+        recording_complete = True
     finally:
         # Save ATIF trajectory for Harbor analysis
-        trajectory_builder.save(_AGENT_LOGS / "trajectory.json")
+        trajectory_builder.save(_AGENT_LOGS / "trajectory.json", incomplete=not recording_complete)
 
     print()  # Final newline
 
