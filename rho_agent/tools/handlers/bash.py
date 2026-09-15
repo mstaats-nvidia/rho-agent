@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import time
 from typing import Any
 
@@ -13,6 +14,19 @@ from ..base import ToolHandler, ToolInvocation, ToolOutput
 
 DEFAULT_TIMEOUT_RESTRICTED = 120  # seconds
 DEFAULT_TIMEOUT_UNRESTRICTED = 300  # 5 minutes for complex builds
+
+
+def _kill_shell_group(process: asyncio.subprocess.Process) -> None:
+    """Kill this invocation's shell and same-session children on POSIX."""
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        # The process/group may exit between the deadline and cleanup.
+        pass
+
 
 # Allowlist of safe read-only commands (used in RESTRICTED mode)
 ALLOWED_COMMANDS = {
@@ -347,46 +361,29 @@ class BashHandler(ToolHandler):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
+                start_new_session=os.name == "posix",
             )
 
+            communication = asyncio.create_task(process.communicate())
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    asyncio.shield(communication),
                     timeout=timeout,
                 )
             except asyncio.CancelledError:
-                # Clean up subprocess on cancellation
-                process.kill()
-                await process.wait()
+                # Children can retain the pipes after their shell dies.
+                _kill_shell_group(process)
+                await communication
                 raise
             except TimeoutError:
+                _kill_shell_group(process)
+                partial_stdout, partial_stderr = await communication
                 duration = time.perf_counter() - start_time
 
-                # Capture partial output before killing
-                partial_stdout = b""
-                partial_stderr = b""
-                try:
-                    if process.stdout:
-                        partial_stdout = await asyncio.wait_for(
-                            process.stdout.read(50000), timeout=2.0
-                        )
-                except (TimeoutError, Exception):
-                    pass
-                try:
-                    if process.stderr:
-                        partial_stderr = await asyncio.wait_for(
-                            process.stderr.read(50000), timeout=2.0
-                        )
-                except (TimeoutError, Exception):
-                    pass
-
-                process.kill()
-                await process.wait()
-
                 # Combine stdout/stderr into a single output string
-                output = partial_stdout.decode("utf-8", errors="replace")
+                output = partial_stdout[:50000].decode("utf-8", errors="replace")
                 if partial_stderr:
-                    stderr_text = partial_stderr.decode("utf-8", errors="replace")
+                    stderr_text = partial_stderr[:50000].decode("utf-8", errors="replace")
                     output = f"{output}\n{stderr_text}" if output else stderr_text
                 output += f"\n\n[Command timed out after {timeout}s and was killed]"
 
