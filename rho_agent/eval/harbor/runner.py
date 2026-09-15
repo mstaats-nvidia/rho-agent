@@ -30,6 +30,7 @@ for env_path in [Path.cwd() / ".env", _pkg_root / ".env", Path("/rho-agent/.env"
 
 _EVAL_PROMPT = Path(__file__).parent.parent.parent / "prompts" / "eval_terminal.md"
 _REVIEWER_PROMPT = Path(__file__).parent.parent.parent / "prompts" / "eval_reviewer.md"
+_AGENT_LOGS = Path("/logs/agent")
 
 # Reviewer system prompt (text-only, no tools)
 _REVIEWER_SYSTEM = """\
@@ -255,10 +256,13 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
 
             text_content = ""
             turn_events: list[AgentEvent] = []
+            trajectory_builder.checkpoint(
+                _AGENT_LOGS / "trajectory.json", turn_events, user_input=prompt_text
+            )
 
             def _write_tokens() -> None:
                 """Write tokens/cost incrementally to mounted path (survives process kill)."""
-                Path("/logs/agent/tokens.json").write_text(
+                (_AGENT_LOGS / "tokens.json").write_text(
                     json.dumps(
                         {
                             "input": session.state.usage["input_tokens"],
@@ -319,10 +323,22 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
                         )
                     _write_tokens()
 
-            await session.run(prompt_text, on_event=on_event)
+                if event.type in {
+                    "tool_start",
+                    "tool_end",
+                    "api_call_complete",
+                    "error",
+                    "turn_complete",
+                }:
+                    trajectory_builder.checkpoint(
+                        _AGENT_LOGS / "trajectory.json", turn_events, user_input=prompt_text
+                    )
 
-            # Build trajectory from this turn's events
-            trajectory_builder.build_from_events(turn_events, user_input=prompt_text)
+            try:
+                await session.run(prompt_text, on_event=on_event)
+            finally:
+                # Preserve partial evidence on cancellation as well as normal completion.
+                trajectory_builder.build_from_events(turn_events, user_input=prompt_text)
 
             return text_content
 
@@ -363,7 +379,7 @@ async def run_task(instruction: str, working_dir: str = "/app", bash_only: bool 
             )
     finally:
         # Save ATIF trajectory for Harbor analysis
-        trajectory_builder.save("/logs/agent/trajectory.json")
+        trajectory_builder.save(_AGENT_LOGS / "trajectory.json")
 
     print()  # Final newline
 

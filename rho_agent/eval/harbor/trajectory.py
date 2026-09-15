@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -235,7 +238,7 @@ class TrajectoryBuilder:
         }
 
     def save(self, path: Path | str) -> None:
-        """Write trajectory to JSON file.
+        """Atomically write trajectory JSON, preserving the last complete checkpoint.
 
         Args:
             path: Output file path.
@@ -244,4 +247,26 @@ class TrajectoryBuilder:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         trajectory = self.to_trajectory()
-        path.write_text(json.dumps(trajectory, indent=2))
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(trajectory, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def checkpoint(self, path: Path | str, events: list[AgentEvent], *, user_input: str) -> None:
+        """Save completed turns plus the observed prefix of the current turn.
+
+        Keep the completed-turn builder unchanged, so later checkpoints and the
+        final trajectory cannot duplicate an in-progress turn.
+        """
+        snapshot = deepcopy(self)
+        snapshot.build_from_events(events, user_input=user_input)
+        snapshot.save(path)
