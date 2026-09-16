@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import uuid
-from copy import deepcopy
+from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -253,12 +252,10 @@ class TrajectoryBuilder:
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False
+                mode="w", dir=path.parent, prefix="." + path.name + ".", suffix=".tmp", delete=False
             ) as stream:
                 temporary = Path(stream.name)
                 json.dump(trajectory, stream, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
             temporary.replace(path)
         finally:
             if temporary is not None:
@@ -270,6 +267,8 @@ class TrajectoryBuilder:
         Keep the completed-turn builder unchanged, so later checkpoints and the
         final trajectory cannot duplicate an in-progress turn.
         """
-        snapshot = deepcopy(self)
+        snapshot = copy(self)
+        # Completed steps are read-only; only the snapshot's list is appended to.
+        snapshot._steps = self._steps.copy()
         snapshot.build_from_events(events, user_input=user_input)
         snapshot.save(path, incomplete=True)

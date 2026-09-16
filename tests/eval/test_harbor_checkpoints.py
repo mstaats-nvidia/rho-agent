@@ -90,6 +90,21 @@ def test_checkpoint_keeps_completed_turns_without_duplicates(tmp_path):
     assert len(json.loads(path.read_text())["steps"]) == 4
 
 
+def test_checkpoint_does_not_change_completed_token_totals(tmp_path):
+    builder = TrajectoryBuilder(model="test")
+    builder.build_from_events(
+        [AgentEvent(type="turn_complete", usage={"total_input_tokens": 10})], "first"
+    )
+    path = tmp_path / "trajectory.json"
+    builder.checkpoint(
+        path,
+        [AgentEvent(type="turn_complete", usage={"total_input_tokens": 20})],
+        user_input="second",
+    )
+    assert json.loads(path.read_text())["metadata"]["total_input_tokens"] == 20
+    assert builder.to_trajectory()["metadata"]["total_input_tokens"] == 10
+
+
 def test_failed_replacement_preserves_previous_checkpoint(tmp_path, monkeypatch):
     builder = TrajectoryBuilder(model="test")
     path = tmp_path / "trajectory.json"
