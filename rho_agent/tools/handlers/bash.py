@@ -20,12 +20,25 @@ def _kill_shell_group(process: asyncio.subprocess.Process) -> None:
     """Kill this invocation's shell and same-session children on POSIX."""
     try:
         if os.name == "posix":
+            # The shell may have exited while children still hold its output pipes.
             os.killpg(process.pid, signal.SIGKILL)
         elif process.returncode is None:
             process.kill()
     except ProcessLookupError:
         # The process/group may exit between the deadline and cleanup.
         pass
+
+
+async def _kill_and_drain(
+    process: asyncio.subprocess.Process, communication: asyncio.Task[tuple[bytes, bytes]]
+) -> tuple[bytes, bytes]:
+    _kill_shell_group(process)
+    try:
+        # A child that starts a separate session can outlive the killed group.
+        # Cancel the reader on expiry instead of leaving a background task pending.
+        return await asyncio.wait_for(communication, timeout=2.0)
+    except TimeoutError:
+        return b"", b""
 
 
 # Allowlist of safe read-only commands (used in RESTRICTED mode)
@@ -372,12 +385,10 @@ class BashHandler(ToolHandler):
                 )
             except asyncio.CancelledError:
                 # Children can retain the pipes after their shell dies.
-                _kill_shell_group(process)
-                await communication
+                await _kill_and_drain(process, communication)
                 raise
             except TimeoutError:
-                _kill_shell_group(process)
-                partial_stdout, partial_stderr = await communication
+                partial_stdout, partial_stderr = await _kill_and_drain(process, communication)
                 duration = time.perf_counter() - start_time
 
                 # Combine stdout/stderr into a single output string
