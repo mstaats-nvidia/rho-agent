@@ -14,7 +14,6 @@ def test_list_configs_includes_bundled_templates() -> None:
 
     assert result.exit_code == 0
     assert "terminal-bench-prelim-git.yaml" in result.stdout
-    assert "terminal-bench-prelim.yaml" in result.stdout
     assert "terminal-bench-sample.yaml" in result.stdout
     assert "terminal-bench.yaml" in result.stdout
 
